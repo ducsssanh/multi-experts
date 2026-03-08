@@ -1,0 +1,112 @@
+---
+# ====================================
+# K8s Cluster Setup Playbook
+# ====================================
+
+# Play 1: Cài đặt chung trên tất cả K8s nodes
+- name: "[Common] Install K8s prerequisites on all nodes"
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - common
+
+# Play 2: Init Control Plane
+- name: "[Control Plane] Initialize K8s master"
+  hosts: control_plane
+  become: true
+  roles:
+    - control_plane
+
+# Play 3: Join Workers
+- name: "[Workers] Join worker nodes to cluster"
+  hosts: workers
+  become: true
+  roles:
+    - worker
+
+# Play 4: Verify cluster
+- name: "[Verify] Check K8s cluster status"
+  hosts: control_plane
+  become: false
+  tasks:
+    - name: Wait for all nodes to be Ready
+      shell: kubectl get nodes --no-headers | grep -c "Ready"
+      register: ready_count
+      retries: 12
+      delay: 10
+      until: ready_count.stdout | int >= 3
+
+    # Fix: CoreDNS starts trên CP trước khi Cilium + workers ready
+    # → forward . /etc/resolv.conf bị cache lỗi + pod ở CP không resolve được
+    # Restart sau khi tất cả nodes Ready → CoreDNS được schedule lên workers
+    - name: Restart CoreDNS (fix race condition with Cilium startup)
+      shell: kubectl rollout restart deployment/coredns -n kube-system
+
+    - name: Wait for CoreDNS to be ready
+      shell: kubectl rollout status deployment/coredns -n kube-system --timeout=120s
+      retries: 3
+      delay: 10
+
+    - name: Verify DNS resolution from pod
+      shell: |
+        kubectl run dns-verify --image=busybox:1.36 --restart=Never --rm -i \
+          -- sh -c 'nslookup ec2.ap-southeast-1.amazonaws.com 2>&1'
+      register: dns_test
+      retries: 5
+      delay: 10
+      until: dns_test.rc == 0
+
+    - name: Print DNS verification
+      debug:
+        msg: "{{ dns_test.stdout_lines }}"
+
+    - name: Show cluster nodes
+      shell: kubectl get nodes -o wide
+      register: nodes_output
+
+    - name: Print cluster status
+      debug:
+        msg: "{{ nodes_output.stdout_lines }}"
+
+    - name: Show cluster pods (kube-system)
+      shell: kubectl get pods -n kube-system -o wide
+      register: pods_output
+
+    - name: Print system pods
+      debug:
+        msg: "{{ pods_output.stdout_lines }}"
+
+    - name: Verify Cilium status
+      shell: kubectl -n kube-system exec ds/cilium -- cilium status --brief
+      register: cilium_status
+      retries: 6
+      delay: 10
+      until: cilium_status.rc == 0
+      ignore_errors: true
+
+    - name: Print Cilium status
+      debug:
+        msg: "{{ cilium_status.stdout_lines | default(['Cilium status not available yet']) }}"
+
+    - name: Verify kube-proxy replacement is active
+      shell: kubectl -n kube-system exec ds/cilium -- cilium status | grep 'KubeProxyReplacement'
+      register: kpr_status
+      ignore_errors: true
+
+    - name: Print kube-proxy replacement status
+      debug:
+        msg: "{{ kpr_status.stdout | default('KubeProxyReplacement status not available') }}"
+
+# Play 5: Install EBS CSI Driver
+- name: "[EBS CSI] Install AWS EBS CSI Driver"
+  hosts: control_plane
+  become: true
+  roles:
+    - ebs_csi
+
+# Play 6: Deploy Jenkins
+- name: "[Jenkins] Deploy Jenkins with EBS PV"
+  hosts: control_plane
+  become: true
+  roles:
+    - jenkins

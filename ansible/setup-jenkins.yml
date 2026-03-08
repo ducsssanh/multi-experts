@@ -1,0 +1,319 @@
+---
+# ====================================
+# Ansible Playbook: Setup Jenkins for CI/CD
+# ====================================
+# Chạy sau khi Jenkins đã deploy (site.yml):
+#   ansible-playbook setup-jenkins.yml -e "dockerhub_user=ducsssanh dockerhub_pass=xxx snyk_token=xxx"
+#
+# Cài đặt:
+#   1. Jenkins plugins (pipeline, git, docker, credentials, snyk)
+#   2. Docker CLI trong Jenkins pod
+#   3. Docker Hub credentials
+#   4. Snyk token
+#   5. Jenkins pipeline job từ GitHub
+# ====================================
+
+- name: "[Jenkins] Setup CI/CD tools and configuration"
+  hosts: control_plane
+  become: false
+  vars:
+    jenkins_namespace: jenkins
+    jenkins_plugins:
+      - workflow-aggregator      # Pipeline
+      - git                      # Git SCM
+      - github                   # GitHub integration
+      - github-branch-source     # GitHub webhook
+      - docker-workflow          # Docker pipeline
+      - docker-plugin            # Docker
+      - credentials-binding      # Credentials
+      - pipeline-stage-view      # Stage view UI
+      - blueocean                # Blue Ocean UI
+      - snyk-security-scanner    # Snyk plugin
+      - kubernetes               # K8s plugin
+      - kubernetes-cli            # kubectl trong pipeline
+      - timestamper              # Timestamps in logs
+      - ansicolor                # Color output
+
+  tasks:
+    # ---------- 1. Get Jenkins info ----------
+    - name: Get Jenkins pod name
+      shell: kubectl get pod -n {{ jenkins_namespace }} -l app=jenkins -o jsonpath='{.items[0].metadata.name}'
+      register: jenkins_pod
+      changed_when: false
+
+    - name: Get Jenkins initial admin password
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || echo "already-configured"
+      register: jenkins_password
+      changed_when: false
+
+    # ---------- 2. Install Docker CLI trong Jenkins pod ----------
+    - name: Install Docker CLI (static binary) in Jenkins pod
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            if [ ! -f /var/jenkins_home/docker ]; then
+              curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+                -o /tmp/docker.tgz && \
+              tar -xzf /tmp/docker.tgz -C /tmp && \
+              mv /tmp/docker/docker /var/jenkins_home/docker && \
+              chmod +x /var/jenkins_home/docker && \
+              rm -rf /tmp/docker /tmp/docker.tgz
+              echo "Docker CLI installed"
+            else
+              echo "Docker CLI already installed"
+            fi
+            /var/jenkins_home/docker --version 2>/dev/null || echo "Docker CLI ready (needs socket mount)"
+          '
+      register: docker_install_result
+
+    - name: Print Docker install result
+      debug:
+        msg: "{{ docker_install_result.stdout_lines }}"
+
+    # ---------- 3. Mount Docker socket vào Jenkins ----------
+    - name: Check if Jenkins deployment already has docker socket mount
+      shell: |
+        kubectl get deployment jenkins -n {{ jenkins_namespace }} \
+          -o jsonpath='{.spec.template.spec.volumes[?(@.name=="docker-socket")].name}' 2>/dev/null || echo ""
+      register: docker_socket_check
+      changed_when: false
+
+    - name: Patch Jenkins deployment to mount Docker socket
+      when: docker_socket_check.stdout == ""
+      shell: |
+        kubectl patch deployment jenkins -n {{ jenkins_namespace }} --type=json -p='[
+          {
+            "op": "add",
+            "path": "/spec/template/spec/volumes/-",
+            "value": {
+              "name": "docker-socket",
+              "hostPath": {
+                "path": "/var/run/docker.sock",
+                "type": "Socket"
+              }
+            }
+          },
+          {
+            "op": "add",
+            "path": "/spec/template/spec/containers/0/volumeMounts/-",
+            "value": {
+              "name": "docker-socket",
+              "mountPath": "/var/run/docker.sock"
+            }
+          }
+        ]'
+      register: jenkins_patch
+
+    - name: Wait for Jenkins to restart after patch
+      when: jenkins_patch is changed
+      shell: kubectl rollout status deployment/jenkins -n {{ jenkins_namespace }} --timeout=180s
+
+    - name: Re-get Jenkins pod name after restart
+      when: jenkins_patch is changed
+      shell: kubectl get pod -n {{ jenkins_namespace }} -l app=jenkins -o jsonpath='{.items[0].metadata.name}'
+      register: jenkins_pod_new
+      retries: 10
+      delay: 10
+      until: jenkins_pod_new.stdout != ""
+
+    - name: Update Jenkins pod variable
+      when: jenkins_patch is changed
+      set_fact:
+        jenkins_pod:
+          stdout: "{{ jenkins_pod_new.stdout }}"
+
+    - name: Wait for Jenkins to be ready
+      when: jenkins_patch is changed
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/login'
+      register: jenkins_ready
+      retries: 30
+      delay: 10
+      until: jenkins_ready.stdout == "200"
+
+    # ---------- 4. Install Jenkins plugins via CLI ----------
+    - name: Download Jenkins CLI
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            if [ ! -f /var/jenkins_home/jenkins-cli.jar ]; then
+              curl -fsSL http://localhost:8080/jnlpJars/jenkins-cli.jar \
+                -o /var/jenkins_home/jenkins-cli.jar
+              echo "Downloaded jenkins-cli.jar"
+            else
+              echo "jenkins-cli.jar already exists"
+            fi
+          '
+
+    - name: Get Jenkins admin password for CLI
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c 'cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || echo ""'
+      register: admin_pass
+      changed_when: false
+
+    - name: Install Jenkins plugins
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            java -jar /var/jenkins_home/jenkins-cli.jar \
+              -s http://localhost:8080/ \
+              -auth admin:{{ admin_pass.stdout }} \
+              install-plugin {{ jenkins_plugins | join(" ") }} \
+              -restart || echo "Some plugins may need manual install"
+          '
+      register: plugin_install
+      when: admin_pass.stdout != ""
+      ignore_errors: true
+
+    - name: Wait for Jenkins restart after plugin install
+      when: plugin_install is changed and not plugin_install is failed
+      shell: |
+        sleep 30
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/login'
+      register: jenkins_post_plugin
+      retries: 20
+      delay: 10
+      until: jenkins_post_plugin.stdout == "200"
+
+    # ---------- 5. Install Snyk + kubectl in Jenkins ----------
+    - name: Install Snyk CLI in Jenkins pod
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            if [ ! -f /var/jenkins_home/snyk ]; then
+              curl -fsSL https://static.snyk.io/cli/latest/snyk-linux -o /var/jenkins_home/snyk && \
+              chmod +x /var/jenkins_home/snyk
+            fi
+            /var/jenkins_home/snyk --version
+          '
+      register: snyk_version
+
+    - name: Install kubectl in Jenkins pod
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            if [ ! -f /var/jenkins_home/kubectl ]; then
+              curl -fsSLo /var/jenkins_home/kubectl \
+                "https://dl.k8s.io/release/v1.29.15/bin/linux/amd64/kubectl" && \
+              chmod +x /var/jenkins_home/kubectl
+            fi
+            /var/jenkins_home/kubectl version --client
+          '
+      register: kubectl_version
+
+    # ---------- 6. Copy kubeconfig into Jenkins ----------
+    - name: Setup kubeconfig in Jenkins
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c 'mkdir -p /var/jenkins_home/.kube'
+        kubectl cp ~/.kube/config {{ jenkins_namespace }}/{{ jenkins_pod.stdout }}:/var/jenkins_home/.kube/config
+
+    - name: Verify kubectl from Jenkins
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c 'KUBECONFIG=/var/jenkins_home/.kube/config /var/jenkins_home/kubectl get nodes --no-headers'
+      register: kubectl_from_jenkins
+
+    - name: Print kubectl from Jenkins
+      debug:
+        msg: "{{ kubectl_from_jenkins.stdout_lines }}"
+
+    # ---------- 7. Create credentials via Groovy script ----------
+    - name: Create Docker Hub credentials in Jenkins
+      when: dockerhub_user is defined and dockerhub_pass is defined
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            java -jar /var/jenkins_home/jenkins-cli.jar \
+              -s http://localhost:8080/ \
+              -auth admin:{{ admin_pass.stdout }} \
+              groovy = <<GROOVY
+        import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+        import com.cloudbees.plugins.credentials.CredentialsScope
+        import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+        import com.cloudbees.plugins.credentials.domains.Domain
+
+        def domain = Domain.global()
+        def store = SystemCredentialsProvider.getInstance().getStore()
+
+        // Remove existing if any
+        store.getCredentials(domain).findAll { it.id == "dockerhub-credentials" }.each {
+            store.removeCredentials(domain, it)
+        }
+
+        def cred = new UsernamePasswordCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            "dockerhub-credentials",
+            "Docker Hub - {{ dockerhub_user }}",
+            "{{ dockerhub_user }}",
+            "{{ dockerhub_pass }}"
+        )
+        store.addCredentials(domain, cred)
+        println "Docker Hub credentials created: dockerhub-credentials"
+        GROOVY
+          '
+      register: dockerhub_cred_result
+      ignore_errors: true
+
+    - name: Create Snyk token credentials in Jenkins
+      when: snyk_token is defined
+      shell: |
+        kubectl exec -n {{ jenkins_namespace }} {{ jenkins_pod.stdout }} -- \
+          bash -c '
+            java -jar /var/jenkins_home/jenkins-cli.jar \
+              -s http://localhost:8080/ \
+              -auth admin:{{ admin_pass.stdout }} \
+              groovy = <<GROOVY
+        import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+        import com.cloudbees.plugins.credentials.CredentialsScope
+        import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+        import com.cloudbees.plugins.credentials.domains.Domain
+        import hudson.util.Secret
+
+        def domain = Domain.global()
+        def store = SystemCredentialsProvider.getInstance().getStore()
+
+        // Remove existing if any
+        store.getCredentials(domain).findAll { it.id == "snyk-token" }.each {
+            store.removeCredentials(domain, it)
+        }
+
+        def cred = new StringCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            "snyk-token",
+            "Snyk API Token",
+            Secret.fromString("{{ snyk_token }}")
+        )
+        store.addCredentials(domain, cred)
+        println "Snyk token created: snyk-token"
+        GROOVY
+          '
+      register: snyk_cred_result
+      ignore_errors: true
+
+    # ---------- 8. Summary ----------
+    - name: Print setup summary
+      debug:
+        msg:
+          - "========================================="
+          - "✅ Jenkins CI/CD Setup Complete!"
+          - "========================================="
+          - "Jenkins Pod:    {{ jenkins_pod.stdout }}"
+          - "Snyk CLI:       {{ snyk_version.stdout | default('installed') }}"
+          - "kubectl:        {{ kubectl_version.stdout | default('installed') }}"
+          - "Docker CLI:     {{ docker_install_result.stdout_lines[-1] | default('installed') }}"
+          - "Plugins:        {{ jenkins_plugins | length }} plugins installed"
+          - "========================================="
+          - ""
+          - "Tiếp theo:"
+          - "1. Mở Jenkins UI → New Item → Pipeline"
+          - "2. Chọn 'Pipeline script from SCM'"
+          - "3. SCM: Git → URL: https://github.com/ducsssanh/multi-experts.git"
+          - "4. Script Path: Jenkinsfile"
+          - "5. Bật 'GitHub hook trigger for GITScm polling'"
+          - "6. Save & Build Now"

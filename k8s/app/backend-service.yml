@@ -1,0 +1,23 @@
+---
+# ====================================
+# Backend Service (ClusterIP)
+# Internal service cho frontend proxy
+# ====================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: multiexpert
+  labels:
+    app: multiexpert
+    component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: multiexpert
+    component: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP

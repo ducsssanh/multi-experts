@@ -1,0 +1,29 @@
+---
+# ====================================
+# Shared variables for all K8s nodes
+# ====================================
+
+# Kubernetes
+k8s_version: "1.29"
+pod_network_cidr: "172.16.0.0/16"     # KHÔNG được trùng với VPC CIDR (10.0.0.0/16)
+service_cidr: "10.96.0.0/12"
+
+# CNI - Cilium
+cilium_version: "1.16.5"
+cilium_cli_version: "0.16.22"
+cilium_helm_repo: "https://helm.cilium.io/"
+
+# Container runtime
+containerd_version: "1.7.*"
+
+# System
+ansible_user: ubuntu
+
+# Jenkins
+jenkins_namespace: jenkins
+jenkins_storage_size: 20Gi
+jenkins_node_port: 30080
+jenkins_agent_port: 30050
+
+# EBS CSI Driver
+ebs_csi_driver_version: "release-1.37"

@@ -1,11 +1,25 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-pydantic[email]>=2.0
-pydantic-settings>=2.0
-sqlalchemy[asyncio]>=2.0
-aiosqlite
-httpx
-python-jose[cryptography]
-passlib[bcrypt]
-pytest
-pytest-anyio
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# Data Validation
+pydantic[email]==2.10.6
+pydantic-settings==2.7.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+
+# HTTP Client
+httpx==0.28.1
+
+# Form Data
+python-multipart==0.0.20
+
+# Security & Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Testing (dev dependencies - consider moving to requirements-dev.txt)
+pytest==8.3.4
+pytest-anyio==0.0.0

@@ -1,0 +1,25 @@
+{
+    "Return": true,
+    "SecurityGroupRules": [
+        {
+            "SecurityGroupRuleId": "sgr-076009bdac2b2bc7e",
+            "GroupId": "sg-032b78cef56923aa2",
+            "GroupOwnerId": "437801854354",
+            "IsEgress": false,
+            "IpProtocol": "-1",
+            "FromPort": -1,
+            "ToPort": -1,
+            "ReferencedGroupInfo": {
+                "GroupId": "sg-0d53c63d785de2c80",
+                "UserId": "437801854354"
+            },
+            "Tags": [
+                {
+                    "Key": "Description",
+                    "Value": "Allow all from worker nodes (K8s+Cilium)"
+                }
+            ],
+            "SecurityGroupRuleArn": "arn:aws:ec2:ap-southeast-1:437801854354:security-group-rule/sgr-076009bdac2b2bc7e"
+        }
+    ]
+}

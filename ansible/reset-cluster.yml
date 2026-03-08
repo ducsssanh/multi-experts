@@ -1,0 +1,153 @@
+---
+# ====================================
+# Reset K8s Cluster - Xóa sạch để rebuild từ đầu
+# Usage: ansible-playbook reset-cluster.yml
+# ====================================
+
+# Play 1: Reset Workers trước
+- name: "[Reset] Reset worker nodes"
+  hosts: workers
+  become: true
+  tasks:
+    - name: Check if kubelet is active
+      shell: systemctl is-active kubelet
+      register: kubelet_active
+      ignore_errors: true
+
+    - name: Run kubeadm reset on workers
+      shell: kubeadm reset -f
+      when: kubelet_active.stdout == "active" or kubelet_active.stdout == "activating"
+      ignore_errors: true
+
+    - name: Clean up CNI config
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni/net.d
+        - /opt/cni/bin
+
+    - name: Clean up network interfaces (Cilium artifacts)
+      shell: |
+        ip link delete cilium_net 2>/dev/null || true
+        ip link delete cilium_host 2>/dev/null || true
+        ip link delete cilium_vxlan 2>/dev/null || true
+        ip link delete lxc_health 2>/dev/null || true
+        # Xóa tất cả lxc* interfaces
+        for iface in $(ip link show | grep -oP 'lxc[a-z0-9_]+'); do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+      ignore_errors: true
+
+    - name: Clean up iptables rules
+      shell: |
+        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+        ip6tables -F && ip6tables -t nat -F && ip6tables -t mangle -F && ip6tables -X
+      ignore_errors: true
+
+    - name: Clean up K8s directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+
+    - name: Restart containerd (clean state)
+      systemd:
+        name: containerd
+        state: restarted
+      ignore_errors: true
+
+# Play 2: Reset Control Plane
+- name: "[Reset] Reset control plane"
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Check if kubelet is active
+      shell: systemctl is-active kubelet
+      register: kubelet_active
+      ignore_errors: true
+
+    - name: Run kubeadm reset on control plane
+      shell: kubeadm reset -f
+      when: kubelet_active.stdout == "active" or kubelet_active.stdout == "activating"
+      ignore_errors: true
+
+    - name: Clean up CNI config
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni/net.d
+        - /opt/cni/bin
+
+    - name: Clean up network interfaces (Cilium artifacts)
+      shell: |
+        ip link delete cilium_net 2>/dev/null || true
+        ip link delete cilium_host 2>/dev/null || true
+        ip link delete cilium_vxlan 2>/dev/null || true
+        ip link delete lxc_health 2>/dev/null || true
+        for iface in $(ip link show | grep -oP 'lxc[a-z0-9_]+'); do
+          ip link delete "$iface" 2>/dev/null || true
+        done
+      ignore_errors: true
+
+    - name: Clean up iptables rules
+      shell: |
+        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+        ip6tables -F && ip6tables -t nat -F && ip6tables -t mangle -F && ip6tables -X
+      ignore_errors: true
+
+    - name: Clean up K8s directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+
+    - name: Clean up kubeconfig
+      file:
+        path: /home/ubuntu/.kube
+        state: absent
+
+    - name: Clean up manifests on control plane
+      file:
+        path: /home/ubuntu/k8s-manifests
+        state: absent
+
+    - name: Remove Helm repos
+      become: false
+      shell: |
+        helm repo remove cilium 2>/dev/null || true
+      ignore_errors: true
+
+    - name: Restart containerd (clean state)
+      systemd:
+        name: containerd
+        state: restarted
+      ignore_errors: true
+
+    - name: Clean local join command
+      local_action:
+        module: file
+        path: /tmp/k8s_join_command.sh
+        state: absent
+      become: false
+
+- name: "[Reset] Done"
+  hosts: control_plane
+  become: false
+  tasks:
+    - name: Print reset status
+      debug:
+        msg:
+          - "========================================="
+          - "✅ Cluster reset complete!"
+          - "========================================="
+          - "All K8s state has been cleaned."
+          - "Run 'ansible-playbook site.yml' to rebuild."
+          - "========================================="

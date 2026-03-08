@@ -1,0 +1,49 @@
+---
+# ====================================
+# Role: ebs_csi
+# Cài AWS EBS CSI Driver lên K8s cluster
+# ====================================
+
+- name: Check if EBS CSI Driver already installed
+  become: false
+  shell: kubectl get daemonset ebs-csi-node -n kube-system 2>/dev/null
+  register: ebs_csi_check
+  ignore_errors: true
+
+- name: Install AWS EBS CSI Driver
+  become: false
+  shell: >
+    kubectl apply -k
+    "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.37"
+  when: ebs_csi_check.rc != 0
+
+- name: Wait for ebs-csi-controller to be ready
+  become: false
+  shell: >
+    kubectl rollout status deployment/ebs-csi-controller
+    -n kube-system --timeout=120s
+  register: ebs_ctrl_ready
+  retries: 5
+  delay: 15
+  until: ebs_ctrl_ready.rc == 0
+
+- name: Wait for ebs-csi-node DaemonSet to be ready
+  become: false
+  shell: |
+    DESIRED=$(kubectl get daemonset ebs-csi-node -n kube-system -o jsonpath='{.status.desiredNumberScheduled}')
+    READY=$(kubectl get daemonset ebs-csi-node -n kube-system -o jsonpath='{.status.numberReady}')
+    [ "$DESIRED" = "$READY" ] && [ "$DESIRED" != "0" ]
+  register: ebs_node_ready
+  retries: 12
+  delay: 10
+  until: ebs_node_ready.rc == 0
+
+- name: Show EBS CSI Driver pods
+  become: false
+  shell: kubectl get pods -n kube-system | grep ebs-csi
+  register: ebs_pods
+  ignore_errors: true
+
+- name: Print EBS CSI pods status
+  debug:
+    msg: "{{ ebs_pods.stdout_lines }}"

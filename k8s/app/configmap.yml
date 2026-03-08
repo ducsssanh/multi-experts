@@ -1,0 +1,17 @@
+---
+# ====================================
+# ConfigMap cho application
+# Chứa cấu hình chung, không sensitive
+# ====================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: multiexpert
+data:
+  APP_NAME: "Multi-Expert Chatbot"
+  DEBUG: "false"
+  LOG_LEVEL: "info"
+  DATABASE_URL: "sqlite+aiosqlite:///./data/app.db"
+  BACKEND_URL: "http://backend:8000"
+  VLLM_BASE_URL: "http://vllm:8000"

@@ -1,0 +1,26 @@
+---
+# ====================================
+# Role: worker
+# Join worker nodes vào K8s cluster
+# ====================================
+
+- name: Check if node already joined cluster
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: node_joined
+
+- name: Copy join command to worker node
+  copy:
+    src: /tmp/k8s_join_command.sh
+    dest: /tmp/k8s_join_command.sh
+    mode: "0755"
+  when: not node_joined.stat.exists
+
+- name: Join worker node to K8s cluster
+  shell: bash /tmp/k8s_join_command.sh
+  when: not node_joined.stat.exists
+
+- name: Clean up join command
+  file:
+    path: /tmp/k8s_join_command.sh
+    state: absent

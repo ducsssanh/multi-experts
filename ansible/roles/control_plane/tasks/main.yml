@@ -1,0 +1,105 @@
+---
+# ====================================
+# Role: control_plane
+# Init K8s cluster + Cilium CNI (kube-proxy replacement)
+# ====================================
+
+- name: Check if K8s cluster already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_init_check
+
+# ---------- 1. kubeadm init (skip kube-proxy) ----------
+
+- name: Initialize K8s cluster (skip kube-proxy for Cilium replacement)
+  shell: |
+    kubeadm init \
+      --pod-network-cidr={{ pod_network_cidr }} \
+      --service-cidr={{ service_cidr }} \
+      --skip-phases=addon/kube-proxy \
+      --node-name={{ ansible_hostname }}
+  when: not k8s_init_check.stat.exists
+  register: kubeadm_output
+
+- name: Create .kube directory for ubuntu user
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+
+- name: Copy admin.conf to ubuntu user kubeconfig
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+
+# ---------- 2. Install Cilium via Helm ----------
+
+- name: Add Cilium Helm repository
+  become: false
+  shell: helm repo add cilium {{ cilium_helm_repo }} && helm repo update
+
+- name: Check if Cilium is already installed
+  become: false
+  shell: helm list -n kube-system --filter cilium -q
+  register: cilium_installed
+  ignore_errors: true
+
+- name: Get Kubernetes API server IP
+  shell: kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}'
+  become: false
+  register: k8s_api_ip
+
+- name: Install Cilium with kube-proxy replacement
+  become: false
+  shell: |
+    helm install cilium cilium/cilium \
+      --version {{ cilium_version }} \
+      --namespace kube-system \
+      --set kubeProxyReplacement=true \
+      --set k8sServiceHost={{ k8s_api_ip.stdout }} \
+      --set k8sServicePort=6443 \
+      --set ipam.operator.clusterPoolIPv4PodCIDRList={{ pod_network_cidr }} \
+      --set hubble.enabled=true \
+      --set hubble.relay.enabled=true \
+      --set hubble.ui.enabled=true \
+      --set operator.replicas=1
+  when: cilium_installed.stdout == ""
+
+# ---------- 3. Wait for Cilium to be ready ----------
+
+- name: Wait for Cilium pods to be Running
+  become: false
+  shell: |
+    kubectl get pods -n kube-system -l app.kubernetes.io/name=cilium-agent --no-headers | grep -c "Running"
+  register: cilium_agents_ready
+  retries: 30
+  delay: 10
+  until: cilium_agents_ready.stdout | int >= 1
+
+- name: Wait for Control Plane node to be Ready
+  become: false
+  shell: kubectl get nodes --no-headers | grep "Ready"
+  register: cp_ready
+  retries: 12
+  delay: 10
+  until: cp_ready.rc == 0
+
+# ---------- 4. Generate join command ----------
+
+- name: Generate join command for worker nodes
+  shell: kubeadm token create --print-join-command
+  register: join_command
+
+- name: Save join command to local file
+  become: false
+  local_action:
+    module: copy
+    content: "{{ join_command.stdout }}"
+    dest: /tmp/k8s_join_command.sh
+    mode: "0755"

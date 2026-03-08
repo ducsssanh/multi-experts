@@ -1,0 +1,142 @@
+---
+# ====================================
+# Role: jenkins
+# Deploy Jenkins lên K8s với EBS PV
+# ====================================
+
+# ---------- 1. Copy YAML files lên Control Plane ----------
+
+- name: Create jenkins manifests directory on control plane
+  file:
+    path: /home/ubuntu/k8s-manifests/jenkins
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+
+- name: Create storage manifests directory on control plane
+  file:
+    path: /home/ubuntu/k8s-manifests/storage
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+
+- name: Copy StorageClass manifest
+  copy:
+    src: "{{ playbook_dir }}/../k8s/storage/storageclass.yml"
+    dest: /home/ubuntu/k8s-manifests/storage/storageclass.yml
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+
+- name: Copy Jenkins manifests
+  copy:
+    src: "{{ playbook_dir }}/../k8s/jenkins/{{ item }}"
+    dest: /home/ubuntu/k8s-manifests/jenkins/{{ item }}
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+  loop:
+    - namespace.yml
+    - rbac.yml
+    - pvc.yml
+    - deployment.yml
+    - service.yml
+
+# ---------- 2. Apply StorageClass ----------
+
+- name: Apply StorageClass gp3
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/storage/storageclass.yml
+
+- name: Verify StorageClass created
+  become: false
+  shell: kubectl get storageclass gp3
+  register: sc_status
+
+- name: Print StorageClass status
+  debug:
+    msg: "{{ sc_status.stdout_lines }}"
+
+# ---------- 3. Apply Jenkins manifests ----------
+
+- name: Apply Jenkins namespace
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/jenkins/namespace.yml
+
+- name: Apply Jenkins RBAC
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/jenkins/rbac.yml
+
+- name: Apply Jenkins PVC
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/jenkins/pvc.yml
+
+- name: Apply Jenkins Deployment
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/jenkins/deployment.yml
+
+- name: Apply Jenkins Service
+  become: false
+  shell: kubectl apply -f /home/ubuntu/k8s-manifests/jenkins/service.yml
+
+# ---------- 4. Verify ----------
+
+- name: Wait for PVC to be Bound (EBS volume được tạo)
+  become: false
+  shell: kubectl get pvc jenkins-pvc -n jenkins -o jsonpath='{.status.phase}'
+  register: pvc_status
+  retries: 20
+  delay: 15
+  until: pvc_status.stdout == "Bound"
+
+- name: Wait for Jenkins pod to be Running
+  become: false
+  shell: |
+    kubectl get pods -n jenkins -l app=jenkins \
+      --no-headers -o custom-columns=":status.phase" | grep -c "Running"
+  register: jenkins_running
+  retries: 24
+  delay: 15
+  until: jenkins_running.stdout | int >= 1
+
+- name: Get Jenkins pod name
+  become: false
+  shell: kubectl get pod -n jenkins -l app=jenkins -o jsonpath='{.items[0].metadata.name}'
+  register: jenkins_pod_name
+
+- name: Wait for Jenkins to be Ready (readiness probe pass)
+  become: false
+  shell: |
+    kubectl get pod {{ jenkins_pod_name.stdout }} -n jenkins \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  register: jenkins_ready
+  retries: 20
+  delay: 15
+  until: jenkins_ready.stdout == "True"
+
+- name: Get Jenkins initial admin password
+  become: false
+  shell: |
+    kubectl exec {{ jenkins_pod_name.stdout }} -n jenkins \
+      -- cat /var/jenkins_home/secrets/initialAdminPassword
+  register: jenkins_password
+
+- name: Get Worker Node IP (để truy cập Jenkins)
+  become: false
+  shell: |
+    kubectl get pod {{ jenkins_pod_name.stdout }} -n jenkins \
+      -o jsonpath='{.status.hostIP}'
+  register: jenkins_node_ip
+
+- name: Print Jenkins access info
+  debug:
+    msg:
+      - "========================================="
+      - "✅ Jenkins deployed successfully!"
+      - "========================================="
+      - "🌐 URL: http://{{ jenkins_node_ip.stdout }}:30080"
+      - "🔑 Initial Admin Password: {{ jenkins_password.stdout }}"
+      - "📦 PVC Status: Bound (EBS gp3 volume created)"
+      - "========================================="
