@@ -9,9 +9,15 @@ from app.routers import auth, chat, experts, health
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: init DB connections, load expert registry, etc.
+    # Startup: create tables
+    from app.db.session import engine, Base
+    from app.models import user, conversation, expert  # noqa: F401 — register models
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
-    # Shutdown: close connections, cleanup
+    # Shutdown
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:
@@ -24,7 +30,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # TODO: restrict in production
+        allow_origins=["http://localhost:3000"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

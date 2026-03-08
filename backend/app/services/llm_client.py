@@ -1,23 +1,21 @@
-import httpx
+"""Mock LLM client — returns a fixed response for every request."""
 
-from app.config import get_settings
+import asyncio
+from collections.abc import AsyncGenerator
 
 
 class LLMClient:
-    """Thin async wrapper around your vLLM inference endpoint."""
-
-    def __init__(self):
-        settings = get_settings()
-        self.base_url = settings.VLLM_BASE_URL
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=60.0)
+    """Mock LLM client. Replace with real vLLM calls later."""
 
     async def generate(self, prompt: str, model: str | None = None) -> str:
-        # TODO: call vLLM /v1/completions or /v1/chat/completions
-        ...
+        await asyncio.sleep(0.1)
+        return "Hello! I'm a mock expert. Real LLM integration coming soon."
 
-    async def stream(self, prompt: str, model: str | None = None):
-        # TODO: yield chunks from vLLM streaming endpoint
-        ...
+    async def stream(self, prompt: str, model: str | None = None) -> AsyncGenerator[str, None]:
+        response = "Hello! I'm a mock expert. Real LLM integration coming soon."
+        for word in response.split(" "):
+            await asyncio.sleep(0.05)
+            yield word + " "
 
     async def close(self):
-        await self._client.aclose()
+        pass
